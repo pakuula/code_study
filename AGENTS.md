@@ -116,6 +116,110 @@ JOIN conditional_regions cr ON epc.region_id = cr.region_id
 LIMIT 50;
 ```
 
+### Как находить `call_in` (кто и где вызывает функцию)
+
+Основной источник: view `v_call_in` (строится из `call_sites`).
+
+```sql
+-- file:line входящих вызовов функции :func_name в рамках :run_id
+SELECT file_path, line_number, caller_name, invoked_name, confidence, macro_names
+FROM v_call_in
+WHERE run_id = :run_id
+   AND callee_name = :func_name
+ORDER BY file_path, line_number;
+```
+
+Для «чистого» графа (без неоднозначностей и слабых записей):
+
+```sql
+SELECT file_path, line_number, caller_name, invoked_name
+FROM v_call_in
+WHERE run_id = :run_id
+   AND callee_name = :func_name
+   AND ambiguity_group_id IS NULL
+   AND confidence IN ('HIGH', 'MEDIUM')
+ORDER BY file_path, line_number;
+```
+
+Fallback, если вызовов нет в `v_call_in` (например, извлечение есть только в cscope):
+
+```sql
+SELECT f.path AS file_path, rc.line_number, rc.name, rc.detector, rc.confidence
+FROM reference_candidates rc
+JOIN files f ON f.file_id = rc.file_id
+WHERE rc.run_id = :run_id
+   AND rc.name = :func_name
+   AND rc.candidate_type = 'call_candidate'
+ORDER BY f.path, rc.line_number;
+```
+
+Правило отчётности:
+- Если `v_call_in` и fallback расходятся, указывать это явно и приводить обе выборки.
+- В финальном ответе всегда перечислять `file_path:line_number`.
+
+### Как находить переменные: declaration / definition / use
+
+Основной источник declaration/definition: view `v_variable_entities`.
+
+```sql
+-- Где объявлена/определена переменная :var_name в рамках :run_id
+SELECT file_path, line_start, scope,
+          is_declaration, is_definition,
+          detector, confidence
+FROM v_variable_entities
+WHERE run_id = :run_id
+   AND variable_name = :var_name
+ORDER BY is_definition DESC, file_path, line_start;
+```
+
+Основной источник uses: view `v_variable_uses`.
+
+```sql
+-- Где используется переменная :var_name (file:line + enclosing function)
+SELECT file_path, line_number, enclosing_function,
+          access_kind, detector, confidence,
+          resolved_file_path, resolved_scope
+FROM v_variable_uses
+WHERE run_id = :run_id
+   AND variable_name = :var_name
+ORDER BY file_path, line_number;
+```
+
+Для «чистого» отчёта uses (без слабых/неоднозначных):
+
+```sql
+SELECT file_path, line_number, enclosing_function, access_kind
+FROM v_variable_uses
+WHERE run_id = :run_id
+   AND variable_name = :var_name
+   AND ambiguity_group_id IS NULL
+   AND confidence IN ('HIGH', 'MEDIUM')
+ORDER BY file_path, line_number;
+```
+
+Fallback, если `v_variable_uses` пустой или неполный:
+
+```sql
+SELECT f.path AS file_path, rc.line_number,
+          rc.name, rc.candidate_type, rc.access_kind,
+          rc.detector, rc.confidence
+FROM reference_candidates rc
+JOIN files f ON f.file_id = rc.file_id
+WHERE rc.run_id = :run_id
+   AND rc.name = :var_name
+   AND rc.candidate_type = 'read_write_candidate'
+ORDER BY f.path, rc.line_number;
+```
+
+Правило для `static` file-level переменных:
+- В отчёте uses всегда показывать `resolved_file_path` и `resolved_scope`.
+- Для `scope='static'` использование считается корректно разрешённым только в рамках того же файла (`file_path == resolved_file_path`).
+
+Правило отчётности:
+- В финальном ответе всегда давать три секции: `declaration`, `definition`, `uses`.
+- Строки uses перечислять в формате `file_path:line_number -- enclosing_function`.
+- Если `v_variable_uses` и fallback расходятся, показывать обе выборки и явно помечать расхождение.
+
 ### Чеклист качества
 - [ ] Никогда не выполнять `DELETE`, `DROP`, `UPDATE` без явного задания.
 - [ ] При экспорте — включать `detector`, `confidence`, `raw_context`.

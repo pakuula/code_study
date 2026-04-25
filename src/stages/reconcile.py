@@ -29,9 +29,11 @@ CLI:
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 _ROOT = Path(__file__).parent.parent.parent
 if str(_ROOT) not in sys.path:
@@ -40,7 +42,7 @@ if str(_ROOT) not in sys.path:
 import click
 import structlog
 
-from src.db.schema import get_db, init_db
+from src.db.schema import get_db
 
 log = structlog.get_logger(__name__)
 
@@ -56,7 +58,7 @@ DETECTOR_WEIGHT: dict[str, int] = {
 }
 
 # Пороги суммы весов → confidence
-def _weight_to_confidence(total_weight: int, max_weight: int) -> str:
+def _weight_to_confidence(total_weight: int) -> str:
     """Взвешенное правило:
       - tree_sitter+ctags в группе → сумма ≥ 9 → HIGH
       - cscope+ctags → сумма ≥ 7 → HIGH
@@ -86,6 +88,16 @@ def _create_ambiguity_group(
     return cur.lastrowid
 
 
+def _macro_chain_length(raw_macro_names: str | None) -> int:
+    if not raw_macro_names:
+        return 0
+    try:
+        parsed = json.loads(raw_macro_names)
+    except json.JSONDecodeError:
+        return 0
+    return len(parsed) if isinstance(parsed, list) else 0
+
+
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
@@ -106,14 +118,17 @@ def reconcile(
         logger:      опциональный structlog-логгер
 
     Returns:
-        {stage, status, entities_updated, refs_updated, ambiguity_groups_created, errors, elapsed_sec}
+        {stage, status, entities_updated, refs_updated, call_sites_updated, ambiguity_groups_created, errors, elapsed_sec}
     """
     lg = logger or log
     t0 = time.monotonic()
     errors: list[dict] = []
     entities_updated = 0
     refs_updated = 0
+    call_sites_updated = 0
     ambig_created = 0
+
+    lg.info("reconcile_start", source_root=str(source_root), run_id=run_id)
 
     with get_db(db_path) as conn:
         # ==================================================================
@@ -152,7 +167,7 @@ def reconcile(
 
             # Вычислить суммарный вес
             total_weight = sum(DETECTOR_WEIGHT.get(g["detector"], 1) for g in group)
-            new_confidence = _weight_to_confidence(total_weight, max(DETECTOR_WEIGHT.values()))
+            new_confidence = _weight_to_confidence(total_weight)
             reason = (
                 f"reconcile: {len(group)} detectors agree "
                 f"(weight={total_weight}) → {new_confidence}"
@@ -171,7 +186,7 @@ def reconcile(
                         (new_confidence, reason, ag_id, g["entity_id"]),
                     )
                     entities_updated += 1
-                except Exception as exc:
+                except sqlite3.Error as exc:
                     errors.append({"stage": "reconcile", "error": str(exc)})
 
         # ==================================================================
@@ -207,7 +222,7 @@ def reconcile(
                         (rank, g["ref_id"]),
                     )
                     refs_updated += 1
-                except Exception as exc:
+                except sqlite3.Error as exc:
                     errors.append({"stage": "reconcile", "error": str(exc)})
 
             if len(group) == 1:
@@ -216,7 +231,7 @@ def reconcile(
             # Несколько детекторов → boost/ambiguity
             detectors = {g["detector"] for g in group}
             total_weight = sum(DETECTOR_WEIGHT.get(g["detector"], 1) for g in group)
-            new_confidence = _weight_to_confidence(total_weight, max(DETECTOR_WEIGHT.values()))
+            new_confidence = _weight_to_confidence(total_weight)
 
             # Если детекторы конфликтуют по candidate_type → ambiguity_group
             ctypes = {g["candidate_type"] for g in group}
@@ -250,7 +265,143 @@ def reconcile(
                         """,
                         (new_confidence, reason, ag_id, g["ref_id"]),
                     )
-                except Exception as exc:
+                except sqlite3.Error as exc:
+                    errors.append({"stage": "reconcile", "error": str(exc)})
+
+        # ==================================================================
+        # 3. Reconcile call_sites
+        # ==================================================================
+        lg.info("reconcile_call_sites_start")
+
+        call_rows = conn.execute(
+            """
+            SELECT
+                call_id,
+                file_id,
+                caller_entity_id,
+                caller_name,
+                callee_entity_id,
+                callee_name,
+                invoked_name,
+                line_number,
+                col_start,
+                col_end,
+                detector,
+                confidence,
+                macro_names
+            FROM call_sites
+            WHERE run_id = ?
+            ORDER BY file_id, line_number, col_start, detector
+            """,
+            (run_id,),
+        ).fetchall()
+
+        candidate_counts = {
+            (row["name"], row["file_id"]): row["cnt"]
+            for row in conn.execute(
+                """
+                SELECT name, file_id, COUNT(*) AS cnt
+                FROM entities
+                WHERE run_id = ? AND kind = 'function' AND is_definition = 1
+                GROUP BY name, file_id
+                """,
+                (run_id,),
+            ).fetchall()
+        }
+        global_name_counts = {
+            row["name"]: row["cnt"]
+            for row in conn.execute(
+                """
+                SELECT name, COUNT(*) AS cnt
+                FROM entities
+                WHERE run_id = ? AND kind = 'function' AND is_definition = 1
+                GROUP BY name
+                """,
+                (run_id,),
+            ).fetchall()
+        }
+
+        call_groups: dict[tuple, list[dict]] = {}
+        for row in call_rows:
+            key = (
+                row["file_id"],
+                row["caller_entity_id"],
+                row["invoked_name"],
+                row["line_number"],
+                row["col_start"],
+                row["col_end"],
+            )
+            call_groups.setdefault(key, []).append(dict(row))
+
+        for key, group in call_groups.items():
+            detectors = {item["detector"] for item in group}
+            total_weight = sum(DETECTOR_WEIGHT.get(item["detector"], 1) for item in group)
+            ambiguity_group_id: int | None = None
+
+            callee_ids = {item["callee_entity_id"] for item in group if item["callee_entity_id"] is not None}
+            callee_names = {item["callee_name"] for item in group if item["callee_name"]}
+            macro_depth = max(_macro_chain_length(item["macro_names"]) for item in group)
+
+            if len(callee_ids) > 1 or len(callee_names) > 1:
+                ambiguity_group_id = _create_ambiguity_group(
+                    conn,
+                    run_id,
+                    (
+                        f"call '{key[2]}' at file={key[0]} line={key[3]} col={key[4]}: "
+                        f"candidate_callees={sorted(callee_names)}"
+                    ),
+                )
+                ambig_created += 1
+
+            target_name = next(iter(callee_names), None)
+            file_local_candidates = candidate_counts.get((target_name, key[0]), 0) if target_name else 0
+            global_candidates = global_name_counts.get(target_name, 0) if target_name else 0
+
+            if ambiguity_group_id is not None:
+                new_confidence = "MEDIUM"
+                reason = (
+                    f"reconcile: conflicting call-site callees {sorted(callee_names)} "
+                    f"(weight={total_weight})"
+                )
+            elif callee_ids and global_candidates == 1 and macro_depth == 0:
+                new_confidence = "HIGH"
+                reason = "reconcile: direct call uniquely resolved to one function definition"
+            elif callee_ids and (global_candidates == 1 or file_local_candidates == 1):
+                new_confidence = "HIGH"
+                reason = (
+                    "reconcile: call resolved to one function definition "
+                    f"through macro chain depth={macro_depth}"
+                )
+            elif callee_ids:
+                new_confidence = "MEDIUM"
+                reason = (
+                    f"reconcile: call resolved but function name has {global_candidates} candidates"
+                )
+            elif macro_depth > 0:
+                new_confidence = "MEDIUM"
+                reason = (
+                    f"reconcile: macro-mediated call unresolved after macro chain depth={macro_depth}"
+                )
+            else:
+                new_confidence = _weight_to_confidence(total_weight)
+                if new_confidence == "HIGH":
+                    new_confidence = "MEDIUM"
+                reason = "reconcile: unresolved direct call expression"
+
+            for item in group:
+                try:
+                    conn.execute(
+                        """
+                        UPDATE call_sites
+                        SET confidence = ?,
+                            confidence_reason = ?,
+                            ambiguity_group_id = ?
+                        WHERE call_id = ?
+                        """,
+                        (new_confidence, reason, ambiguity_group_id, item["call_id"]),
+                    )
+                    call_sites_updated += 1
+                except sqlite3.Error as exc:
                     errors.append({"stage": "reconcile", "error": str(exc)})
 
         conn.commit()
@@ -260,6 +411,7 @@ def reconcile(
         "reconcile_done",
         entities_updated=entities_updated,
         refs_updated=refs_updated,
+        call_sites_updated=call_sites_updated,
         ambiguity_groups=ambig_created,
         errors=len(errors),
         elapsed_sec=round(elapsed, 2),
@@ -269,6 +421,7 @@ def reconcile(
         "status": "ok" if not errors else "partial",
         "entities_updated": entities_updated,
         "refs_updated": refs_updated,
+        "call_sites_updated": call_sites_updated,
         "ambiguity_groups_created": ambig_created,
         "errors": errors,
         "elapsed_sec": round(elapsed, 2),
@@ -300,4 +453,4 @@ def main(source_dir: str, db_path: str, run_id: int, verbose: bool) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    cast(Any, main)()

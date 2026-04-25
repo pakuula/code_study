@@ -196,6 +196,58 @@ def _find_usages_regex(
     return records
 
 
+def _resolve_entity_id(
+    name: str,
+    file_id: int,
+    candidate_type: str,
+    entities_by_name: dict[str, list[dict]],
+) -> int | None:
+    """Разрешить ссылку на сущность с учётом scope и типа кандидата.
+
+    Ключевая цель: корректно обрабатывать file-level static переменные,
+    чтобы ссылки в файле не уезжали в одноимённые глобальные/чужие записи.
+    """
+    candidates = entities_by_name.get(name, [])
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]["entity_id"]
+
+    prefer_function = (candidate_type == "call_candidate")
+
+    def _score(ent: dict) -> int:
+        score = 0
+        kind = ent.get("kind")
+        scope = ent.get("scope")
+
+        if prefer_function:
+            score += 0 if kind == "function" else 40
+        else:
+            score += 0 if kind != "function" else 40
+            if kind == "variable":
+                score -= 5
+
+        # Для static/local в том же файле — сильный приоритет.
+        if ent.get("file_id") == file_id and scope in ("static", "local"):
+            score -= 30
+        elif ent.get("file_id") == file_id:
+            score -= 15
+
+        if scope in ("global", "extern"):
+            score -= 2
+
+        # Предпочитаем definition при прочих равных.
+        score -= 3 if ent.get("is_definition") else 0
+        score += 3 if ent.get("is_declaration") else 0
+
+        return score
+
+    ranked = sorted(candidates, key=lambda ent: (_score(ent), ent["entity_id"]))
+    if len(ranked) > 1 and _score(ranked[0]) == _score(ranked[1]):
+        return None
+    return ranked[0]["entity_id"]
+
+
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
@@ -231,7 +283,9 @@ def extract_usages(
         # Загрузить сущности текущего прогона
         entity_rows = conn.execute(
             """
-            SELECT entity_id, name, kind FROM entities
+            SELECT entity_id, name, kind, file_id, scope,
+                   is_declaration, is_definition, line_start
+            FROM entities
             WHERE run_id = ?
             """,
             (run_id,),
@@ -253,9 +307,9 @@ def extract_usages(
         entity_names: set[str] = {
             r["name"] for r in entity_rows if len(r["name"]) >= _MIN_NAME_LEN
         }
-        entity_name_to_id: dict[str, int] = {
-            r["name"]: r["entity_id"] for r in entity_rows
-        }
+        entities_by_name: dict[str, list[dict]] = {}
+        for row in entity_rows:
+            entities_by_name.setdefault(row["name"], []).append(dict(row))
 
         lg.info("extract_usages_start", entity_count=len(entity_names))
 
@@ -321,7 +375,12 @@ def extract_usages(
                                 "line_number": lineno,
                                 "candidate_type": ctype,
                                 "access_kind": access_kind,
-                                "resolved_entity_id": entity_name_to_id.get(name),
+                                "resolved_entity_id": _resolve_entity_id(
+                                    name,
+                                    file_id,
+                                    ctype,
+                                    entities_by_name,
+                                ),
                                 "detector": "cscope",
                                 "confidence": "MEDIUM",
                                 "confidence_reason": "cscope cross-reference",
@@ -405,7 +464,12 @@ def extract_usages(
                             rec["line_number"],
                             rec.get("col_start"), rec.get("col_end"),
                             rec["candidate_type"], rec.get("access_kind"),
-                            entity_name_to_id.get(rec["name"]),
+                            _resolve_entity_id(
+                                rec["name"],
+                                rec["file_id"],
+                                rec["candidate_type"],
+                                entities_by_name,
+                            ),
                             rec["detector"], rec["confidence"],
                             rec["confidence_reason"],
                             rec.get("raw_context"),

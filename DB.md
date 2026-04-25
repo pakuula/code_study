@@ -22,12 +22,14 @@ extract_preprocessor → extract_usages → reconcile`
 7. [comments](#7-comments)
 8. [entity_comments](#8-entity_comments)
 9. [reference_candidates](#9-reference_candidates)
-10. [conditional_regions](#10-conditional_regions)
-11. [preprocessor_symbols](#11-preprocessor_symbols)
-12. [entity_presence_conditions](#12-entity_presence_conditions)
-13. [Поля трассировки — общий глоссарий](#13-поля-трассировки--общий-глоссарий)
-14. [Значения confidence](#14-значения-confidence)
-15. [Значения detector](#15-значения-detector)
+10. [call_sites](#10-call_sites)
+11. [conditional_regions](#11-conditional_regions)
+12. [preprocessor_symbols](#12-preprocessor_symbols)
+13. [entity_presence_conditions](#13-entity_presence_conditions)
+14. [Поля трассировки — общий глоссарий](#14-поля-трассировки--общий-глоссарий)
+15. [Значения confidence](#15-значения-confidence)
+16. [Значения detector](#16-значения-detector)
+17. [SQL Views](#17-sql-views)
 
 ---
 
@@ -265,7 +267,57 @@ PK: `(entity_id, comment_id)`.
 
 ---
 
-## 10. `conditional_regions`
+## 10. `call_sites`
+
+Явные точки вызова функций, извлечённые из AST через `tree-sitter-c` на стадии
+`extract_entities`. Это основной источник для построения `call_in` / `call_out`.
+
+| Колонка           | Тип     | Назначение |
+|-------------------|---------|------------|
+| `call_id`         | INTEGER | PK. |
+| `run_id`          | INTEGER | FK → `analysis_runs`. |
+| `file_id`         | INTEGER | FK → `files`. |
+| `caller_entity_id`| INTEGER | FK → `entities`. Функция, внутри которой находится вызов. NULL если caller не удалось сопоставить с записью `entities`. |
+| `caller_name`     | TEXT    | Имя caller-функции для удобства запросов и диагностики. |
+| `callee_entity_id`| INTEGER | FK → `entities`. Целевая функция, если удалось однозначно разрешить. |
+| `callee_name`     | TEXT    | Итоговое имя целевой функции после разворачивания макро-обёрток, если это удалось. |
+| `invoked_name`    | TEXT    | Имя, вызванное непосредственно в исходнике. Может быть именем макроса-обёртки, а не конечной функции. |
+| `call_text`       | TEXT    | Полный текст выражения вызова, например `INVOKE(x)` или `seL4_Send(dest, msg)`. |
+| `line_number`     | INTEGER | Строка вызова (1-based). |
+| `col_start`       | INTEGER | Колонка начала выражения вызова (1-based). |
+| `col_end`         | INTEGER | Колонка конца выражения вызова. |
+| `byte_start`      | INTEGER | Байтовое смещение начала call expression. |
+| `byte_end`        | INTEGER | Байтовое смещение конца call expression. |
+| `macro_names`     | TEXT    | JSON-массив function-like макросов, через которые реализован вызов. Например `["INVOKE","WRAP"]`. NULL для прямого вызова. |
+| `detector`        | TEXT    | Сейчас `tree_sitter`. |
+| `confidence`      | TEXT    | `HIGH` для прямого или успешно развёрнутого macro-call с разрешённым callee, `MEDIUM` для частично разрешённых случаев. |
+| `confidence_reason` | TEXT  | Причина оценки. |
+| `raw_context`     | TEXT    | ±3 строки вокруг вызова. |
+| `raw_context_line_start/end` | INTEGER | Диапазон строк `raw_context`. |
+| `raw_context_byte_start/end` | INTEGER | Байтовый диапазон `raw_context`. |
+| `ambiguity_group_id` | INTEGER | FK → `ambiguity_groups`. Пока обычно NULL; зарезервировано для reconcile вызовов. |
+
+Индексы: `(run_id)`, `(file_id)`, `(caller_entity_id)`, `(callee_entity_id)`.
+
+Практическое применение:
+- `call_in`: выбрать `call_sites` по `callee_entity_id` или `callee_name`.
+- `call_out`: выбрать `call_sites` по `caller_entity_id` или `caller_name`.
+- При macro-mediated вызовах использовать `invoked_name` и `macro_names`, чтобы видеть и исходный токен вызова, и цепочку обёрток.
+
+После стадии `reconcile` для `call_sites` дополнительно нормализуются:
+- `confidence`
+- `confidence_reason`
+- `ambiguity_group_id`
+
+Правила reconcile для вызовов:
+- прямой вызов с однозначно разрешённым `callee_entity_id` получает `HIGH`
+- macro-mediated вызов с однозначно разрешённым terminal callee тоже получает `HIGH`
+- unresolved direct call остаётся `MEDIUM`
+- conflicting callees на одной и той же позиции помечаются через `ambiguity_group_id`
+
+---
+
+## 11. `conditional_regions`
 
 Регионы условной компиляции: `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`.
 Строится как дерево с вложенностью. Заполняется стадией `extract_preprocessor`.
@@ -286,7 +338,7 @@ PK: `(entity_id, comment_id)`.
 
 ---
 
-## 11. `preprocessor_symbols`
+## 12. `preprocessor_symbols`
 
 Макросы и символы препроцессора: `#define`, `#undef`, include guards.
 Заполняется стадией `extract_preprocessor`.
@@ -308,7 +360,7 @@ PK: `(entity_id, comment_id)`.
 
 ---
 
-## 12. `entity_presence_conditions`
+## 13. `entity_presence_conditions`
 
 Связь сущности с условными регионами: «эта сущность доступна только если
 выполняется данное условие». Заполняется стадией `extract_preprocessor`
@@ -329,7 +381,7 @@ PK: `(entity_id, comment_id)`.
 
 ---
 
-## 13. Поля трассировки — общий глоссарий
+## 14. Поля трассировки — общий глоссарий
 
 Следующие поля присутствуют в большинстве таблиц данных:
 
@@ -347,7 +399,7 @@ PK: `(entity_id, comment_id)`.
 
 ---
 
-## 14. Значения `confidence`
+## 15. Значения `confidence`
 
 | Значение | Интерпретация |
 |----------|---------------|
@@ -360,7 +412,7 @@ PK: `(entity_id, comment_id)`.
 
 ---
 
-## 15. Значения `detector`
+## 16. Значения `detector`
 
 | Значение      | Инструмент           | Надёжность | Стадия              |
 |---------------|----------------------|------------|---------------------|
@@ -369,6 +421,134 @@ PK: `(entity_id, comment_id)`.
 | `cscope`      | cscope               | Средняя    | extract_usages      |
 | `regex`       | Python `re`          | Низкая     | все стадии          |
 | `manual_rule` | ручное правило       | Переменная | reconcile           |
+
+---
+
+## 17. SQL Views
+
+В схеме создаются следующие SQL-view:
+- `v_call_edges`
+- `v_call_in`
+- `v_call_out`
+- `v_variable_entities`
+- `v_variable_uses`
+
+Ниже приведено назначение каждого view и примеры запросов.
+
+### `v_call_edges`
+
+Нормализованный enriched view поверх `call_sites`, `files`, `entities`.
+Содержит:
+- `caller_name`, `caller_signature`
+- `callee_name`, `callee_signature`
+- `file_path`
+- координаты вызова, `macro_names`, `confidence`, `raw_context`
+
+Пример:
+
+```sql
+SELECT *
+FROM v_call_edges
+WHERE run_id = :run_id
+  AND callee_name = 'seL4_Send';
+```
+
+### `v_call_in`
+
+Ориентация на входящие вызовы: кто вызывает данную функцию.
+
+Пример:
+
+```sql
+SELECT caller_name, file_path, line_number, call_text, macro_names, confidence
+FROM v_call_in
+WHERE run_id = :run_id
+  AND callee_name = :func_name
+ORDER BY caller_name, file_path, line_number;
+```
+
+### `v_call_out`
+
+Ориентация на исходящие вызовы: кого вызывает данная функция.
+
+Пример:
+
+```sql
+SELECT callee_name, file_path, line_number, call_text, macro_names, confidence
+FROM v_call_out
+WHERE run_id = :run_id
+  AND caller_name = :func_name
+ORDER BY callee_name, file_path, line_number;
+```
+
+### `v_variable_entities`
+
+View над `entities` (только `kind='variable'`) с удобным доступом к месту
+объявления/определения переменной.
+
+Содержит:
+- `variable_name`, `file_path`, `line_start`
+- `scope`
+- `is_declaration`, `is_definition`
+- `detector`, `confidence`, `confidence_reason`
+
+Пример:
+
+```sql
+SELECT variable_name, file_path, line_start,
+       is_declaration, is_definition,
+       scope, detector, confidence
+FROM v_variable_entities
+WHERE run_id = :run_id
+  AND variable_name = :var_name
+ORDER BY is_definition DESC, file_path, line_start;
+```
+
+### `v_variable_uses`
+
+View над `reference_candidates` для uses переменных (только
+`candidate_type='read_write_candidate'`) с привязкой к файлу использования,
+возможному resolved declaration/definition и enclosing function.
+
+Содержит:
+- `variable_name`, `file_path`, `line_number`
+- `enclosing_function`
+- `access_kind` (`read` / `write`)
+- `resolved_entity_id`, `resolved_file_path`, `resolved_scope`
+- `detector`, `confidence`, `confidence_reason`
+
+Пример:
+
+```sql
+SELECT file_path, line_number, enclosing_function,
+       access_kind, resolved_file_path, resolved_scope,
+       detector, confidence
+FROM v_variable_uses
+WHERE run_id = :run_id
+  AND variable_name = :var_name
+ORDER BY file_path, line_number;
+```
+
+Для `static` file-level переменных полезно проверять, что использование остаётся
+в пределах того же файла определения:
+
+```sql
+SELECT file_path, line_number, resolved_file_path, resolved_scope
+FROM v_variable_uses
+WHERE run_id = :run_id
+  AND variable_name = :var_name
+  AND resolved_scope = 'static'
+  AND file_path != resolved_file_path;
+```
+
+Если запрос вернул строки, это кандидаты на неверный резолв `static`-переменной.
+
+Если нужен только надёжный graph, добавляй фильтр:
+
+```sql
+AND confidence = 'HIGH'
+AND ambiguity_group_id IS NULL
+```
 
 ---
 

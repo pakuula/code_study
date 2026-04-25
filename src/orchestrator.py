@@ -117,7 +117,7 @@ def run_analysis(
         {
           run_id, db_path, source_root,
           pipeline_version, stages, all_errors,
-          total: {files, entities, references, comments, includes},
+                    total: {files, entities, references, comments, includes, call_sites},
           elapsed_sec, status
         }
     """
@@ -139,6 +139,7 @@ def run_analysis(
         source_root=str(source_root),
         db_path=str(db_path),
         pipeline_version=PIPELINE_VERSION,
+        verbose=verbose,
         skip=sorted(skip),
     )
 
@@ -266,6 +267,7 @@ def run_analysis(
         "files":      _count("files"),
         "entities":   _count("entities"),
         "references": _count("reference_candidates"),
+        "call_sites": _count("call_sites"),
         "comments":   _count("comments"),
         "includes":   _count("includes"),
         "regions":    _count("conditional_regions"),
@@ -387,4 +389,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    main()  # pyright: ignore[reportCallIssue]

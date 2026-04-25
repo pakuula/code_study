@@ -20,7 +20,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator, cast
 
 # ---------------------------------------------------------------------------
 # Путь к корню пакета (для запуска как скрипта)
@@ -257,6 +257,42 @@ DDL: list[str] = [
     )
     """,
     # ------------------------------------------------------------------
+    # Точки вызова функций / call graph edges
+    # ------------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS call_sites (
+        call_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id              INTEGER NOT NULL,
+        file_id             INTEGER NOT NULL,
+        caller_entity_id    INTEGER,
+        caller_name         TEXT,
+        callee_entity_id    INTEGER,
+        callee_name         TEXT    NOT NULL,
+        invoked_name        TEXT    NOT NULL,
+        call_text           TEXT,
+        line_number         INTEGER NOT NULL,
+        col_start           INTEGER,
+        col_end             INTEGER,
+        byte_start          INTEGER,
+        byte_end            INTEGER,
+        macro_names         TEXT,              -- JSON array of macro wrappers
+        detector            TEXT    NOT NULL,
+        confidence          TEXT    NOT NULL DEFAULT 'MEDIUM',
+        confidence_reason   TEXT,
+        raw_context         TEXT,
+        raw_context_line_start INTEGER,
+        raw_context_line_end   INTEGER,
+        raw_context_byte_start INTEGER,
+        raw_context_byte_end   INTEGER,
+        ambiguity_group_id  INTEGER,
+        FOREIGN KEY (run_id)             REFERENCES analysis_runs(run_id),
+        FOREIGN KEY (file_id)            REFERENCES files(file_id),
+        FOREIGN KEY (caller_entity_id)   REFERENCES entities(entity_id),
+        FOREIGN KEY (callee_entity_id)   REFERENCES entities(entity_id),
+        FOREIGN KEY (ambiguity_group_id) REFERENCES ambiguity_groups(group_id)
+    )
+    """,
+    # ------------------------------------------------------------------
     # Условные регионы (#if / #ifdef / #else / #endif)
     # ------------------------------------------------------------------
     """
@@ -328,12 +364,180 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_refs_entity       ON reference_candidates(resolved_entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_refs_run          ON reference_candidates(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_refs_conf         ON reference_candidates(confidence)",
+    "CREATE INDEX IF NOT EXISTS idx_calls_run         ON call_sites(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_calls_file        ON call_sites(file_id)",
+    "CREATE INDEX IF NOT EXISTS idx_calls_caller      ON call_sites(caller_entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_calls_callee      ON call_sites(callee_entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_cond_file         ON conditional_regions(file_id)",
     "CREATE INDEX IF NOT EXISTS idx_cond_run          ON conditional_regions(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_pp_name           ON preprocessor_symbols(name)",
     "CREATE INDEX IF NOT EXISTS idx_pp_file           ON preprocessor_symbols(file_id)",
     "CREATE INDEX IF NOT EXISTS idx_epc_entity        ON entity_presence_conditions(entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_ambig_run         ON ambiguity_groups(run_id)",
+]
+
+VIEWS: list[str] = [
+    """
+    CREATE VIEW IF NOT EXISTS v_call_edges AS
+    SELECT
+        cs.call_id,
+        cs.run_id,
+        cs.file_id,
+        f.path AS file_path,
+        cs.caller_entity_id,
+        COALESCE(caller.name, cs.caller_name) AS caller_name,
+        caller.signature AS caller_signature,
+        cs.callee_entity_id,
+        COALESCE(callee.name, cs.callee_name) AS callee_name,
+        callee.signature AS callee_signature,
+        cs.invoked_name,
+        cs.call_text,
+        cs.line_number,
+        cs.col_start,
+        cs.col_end,
+        cs.byte_start,
+        cs.byte_end,
+        cs.macro_names,
+        cs.detector,
+        cs.confidence,
+        cs.confidence_reason,
+        cs.raw_context,
+        cs.raw_context_line_start,
+        cs.raw_context_line_end,
+        cs.raw_context_byte_start,
+        cs.raw_context_byte_end,
+        cs.ambiguity_group_id
+    FROM call_sites cs
+    JOIN files f ON f.file_id = cs.file_id
+    LEFT JOIN entities caller ON caller.entity_id = cs.caller_entity_id
+    LEFT JOIN entities callee ON callee.entity_id = cs.callee_entity_id
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS v_call_out AS
+    SELECT
+        call_id,
+        run_id,
+        caller_entity_id,
+        caller_name,
+        caller_signature,
+        callee_entity_id,
+        callee_name,
+        callee_signature,
+        invoked_name,
+        file_id,
+        file_path,
+        line_number,
+        col_start,
+        col_end,
+        call_text,
+        macro_names,
+        detector,
+        confidence,
+        confidence_reason,
+        raw_context,
+        ambiguity_group_id
+    FROM v_call_edges
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS v_call_in AS
+    SELECT
+        call_id,
+        run_id,
+        callee_entity_id,
+        callee_name,
+        callee_signature,
+        caller_entity_id,
+        caller_name,
+        caller_signature,
+        invoked_name,
+        file_id,
+        file_path,
+        line_number,
+        col_start,
+        col_end,
+        call_text,
+        macro_names,
+        detector,
+        confidence,
+        confidence_reason,
+        raw_context,
+        ambiguity_group_id
+    FROM v_call_edges
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS v_variable_entities AS
+    SELECT
+        e.entity_id,
+        e.run_id,
+        e.file_id,
+        f.path AS file_path,
+        e.name AS variable_name,
+        e.scope,
+        e.signature,
+        e.line_start,
+        e.is_declaration,
+        e.is_definition,
+        e.detector,
+        e.confidence,
+        e.confidence_reason,
+        e.raw_context,
+        e.ambiguity_group_id
+    FROM entities e
+    JOIN files f ON f.file_id = e.file_id
+    WHERE e.kind = 'variable'
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS v_variable_uses AS
+    SELECT
+        rc.ref_id,
+        rc.run_id,
+        rc.file_id,
+        f.path AS file_path,
+        rc.line_number,
+        rc.col_start,
+        rc.col_end,
+        rc.name AS variable_name,
+        rc.candidate_type,
+        rc.access_kind,
+        rc.resolved_entity_id,
+        ve.scope AS resolved_scope,
+        ve.file_id AS resolved_file_id,
+        vf.path AS resolved_file_path,
+        (
+            SELECT ef.name
+            FROM entities ef
+            WHERE ef.run_id = rc.run_id
+              AND ef.file_id = rc.file_id
+              AND ef.kind = 'function'
+              AND ef.is_definition = 1
+              AND ef.line_start <= rc.line_number
+            ORDER BY ef.line_start DESC
+            LIMIT 1
+        ) AS enclosing_function,
+        rc.detector,
+        rc.confidence,
+        rc.confidence_reason,
+        rc.raw_context,
+        rc.ambiguity_group_id
+    FROM reference_candidates rc
+    JOIN files f ON f.file_id = rc.file_id
+    LEFT JOIN entities ve ON ve.entity_id = rc.resolved_entity_id
+    LEFT JOIN files vf ON vf.file_id = ve.file_id
+    WHERE rc.candidate_type = 'read_write_candidate'
+      AND (
+          ve.kind = 'variable'
+          OR rc.resolved_entity_id IS NULL
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM entities ed
+          WHERE ed.run_id = rc.run_id
+            AND ed.file_id = rc.file_id
+            AND ed.name = rc.name
+            AND ed.kind = 'variable'
+            AND ed.line_start = rc.line_number
+      )
+    """,
 ]
 
 
@@ -351,6 +555,8 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     for stmt in DDL:
         conn.execute(stmt)
     for stmt in INDEXES:
+        conn.execute(stmt)
+    for stmt in VIEWS:
         conn.execute(stmt)
     conn.commit()
     return conn
@@ -447,9 +653,10 @@ def main(db_path: str, verbose: bool) -> None:
         click.echo(f"БД: {os.path.abspath(db_path)}")
         click.echo(f"Таблиц проверено: {len(DDL)}")
         click.echo(f"Индексов проверено: {len(INDEXES)}")
+        click.echo(f"View проверено: {len(VIEWS)}")
     conn.close()
     click.echo(f"OK: {db_path}")
 
 
 if __name__ == "__main__":
-    main()
+    cast(Any, main)()
