@@ -411,8 +411,10 @@ DDL: list[str] = [
         col_end                INTEGER,
         type_name              TEXT    NOT NULL,
         owner_name             TEXT,
+        enclosing_function     TEXT,
+            -- NULL for global/field/typedef_target; func name for func_param/func_return/local_var
         use_context            TEXT    NOT NULL,
-            -- func_param / func_return / global_var / static_var / field / typedef_target
+            -- func_param / func_return / global_var / static_var / field / typedef_target / local_var
         by_pointer             INTEGER DEFAULT 0,
         indirection_level      INTEGER DEFAULT 0,
         resolved_alias_id      INTEGER,
@@ -471,6 +473,7 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_tres_run          ON type_resolutions(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_tres_alias        ON type_resolutions(alias_name)",
     "CREATE INDEX IF NOT EXISTS idx_tuses_run         ON type_uses(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tuses_encfn       ON type_uses(run_id, enclosing_function)",
     "CREATE INDEX IF NOT EXISTS idx_tuses_name        ON type_uses(type_name)",
     "CREATE INDEX IF NOT EXISTS idx_tuses_ctx         ON type_uses(use_context)",
     "CREATE INDEX IF NOT EXISTS idx_ambig_run         ON ambiguity_groups(run_id)",
@@ -695,6 +698,7 @@ VIEWS: list[str] = [
         tu.col_end,
         tu.type_name,
         tu.owner_name,
+        tu.enclosing_function,
         tu.use_context,
         tu.by_pointer,
         tu.indirection_level,

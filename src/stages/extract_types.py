@@ -73,6 +73,7 @@ class _TypeUseRow:
     col_end: int | None
     type_name: str
     owner_name: str | None
+    enclosing_function: str | None
     use_context: str
     by_pointer: int
     indirection_level: int
@@ -328,6 +329,7 @@ def _extract_file_rows(
                     col_end=type_node.end_point[1] + 1,
                     type_name=target_base_name,
                     owner_name=alias_name,
+                    enclosing_function=None,
                     use_context="typedef_target",
                     by_pointer=1 if ptr_depth > 0 else 0,
                     indirection_level=ptr_depth,
@@ -379,6 +381,7 @@ def _extract_file_rows(
                     col_end=type_node.end_point[1] + 1,
                     type_name=ret_base_name,
                     owner_name=func_name,
+                    enclosing_function=func_name,
                     use_context="func_return",
                     by_pointer=1 if ret_ptr_depth > 0 else 0,
                     indirection_level=ret_ptr_depth,
@@ -412,6 +415,7 @@ def _extract_file_rows(
                     col_end=p_type.end_point[1] + 1,
                     type_name=p_base_name,
                     owner_name=func_name,
+                    enclosing_function=func_name,
                     use_context="func_param",
                     by_pointer=1 if p_ptr_depth > 0 else 0,
                     indirection_level=p_ptr_depth,
@@ -455,6 +459,7 @@ def _extract_file_rows(
                     col_end=type_node.end_point[1] + 1,
                     type_name=base_name,
                     owner_name=owner_name,
+                    enclosing_function=None,
                     use_context="static_var" if is_static else "global_var",
                     by_pointer=1 if ptr_depth > 0 else 0,
                     indirection_level=ptr_depth,
@@ -501,6 +506,7 @@ def _extract_file_rows(
                 col_end=type_node.end_point[1] + 1,
                 type_name=base_name,
                 owner_name=struct_name,
+                enclosing_function=None,
                 use_context="field",
                 by_pointer=by_ptr,
                 indirection_level=ptr_depth,
@@ -513,6 +519,60 @@ def _extract_file_rows(
                 raw_context_byte_end=be,
             )
         )
+
+    # ------------------------------------------------------------------
+    # local variable declarations inside function bodies
+    # owner_name = имя переменной, enclosing_function = имя функции
+    # ------------------------------------------------------------------
+    for fn_def in _iter_nodes(root, {"function_definition"}):
+        fn_declarator = fn_def.child_by_field_name("declarator")
+        fn_body = fn_def.child_by_field_name("body")
+        if fn_declarator is None or fn_body is None:
+            continue
+        func_name, _, _ = _unwrap_declarator(fn_declarator, source_bytes)
+        if not func_name:
+            continue
+
+        # Обход всех declaration-нод внутри тела функции (рекурсивно,
+        # включая вложенные блоки if/for/while/switch).
+        # Пропускаем declaration, которые напрямую являются function_definition
+        # (вложенные функции — редкость в C, но отдельная декларация внутри блока
+        # всегда declaration, не function_definition).
+        for decl in _iter_nodes(fn_body, {"declaration"}):
+            type_node = decl.child_by_field_name("type")
+            if type_node is None:
+                continue
+            _, base_name, kind = _type_info(type_node, source_bytes)
+            if kind == "builtin" or not base_name:
+                continue
+
+            for dnode in _collect_declarator_nodes(decl):
+                var_name, ptr_depth, is_func = _unwrap_declarator(dnode, source_bytes)
+                if is_func:
+                    continue
+                line_number = decl.start_point[0] + 1
+                raw, ls, le, bs, be = get_raw_context(abs_path, line_number)
+                use_rows.append(
+                    _TypeUseRow(
+                        file_id=file_id,
+                        line_number=line_number,
+                        col_start=type_node.start_point[1] + 1,
+                        col_end=type_node.end_point[1] + 1,
+                        type_name=base_name,
+                        owner_name=var_name,
+                        enclosing_function=func_name,
+                        use_context="local_var",
+                        by_pointer=1 if ptr_depth > 0 else 0,
+                        indirection_level=ptr_depth,
+                        confidence="HIGH",
+                        confidence_reason="tree_sitter local variable declaration",
+                        raw_context=raw,
+                        raw_context_line_start=ls,
+                        raw_context_line_end=le,
+                        raw_context_byte_start=bs,
+                        raw_context_byte_end=be,
+                    )
+                )
 
     return alias_rows, use_rows, errors
 
@@ -648,12 +708,12 @@ def extract_types(
                     INSERT INTO type_uses (
                         run_id, file_id,
                         line_number, col_start, col_end,
-                        type_name, owner_name, use_context,
+                        type_name, owner_name, enclosing_function, use_context,
                         by_pointer, indirection_level,
                         detector, confidence, confidence_reason,
                         raw_context, raw_context_line_start, raw_context_line_end,
                         raw_context_byte_start, raw_context_byte_end
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -663,6 +723,7 @@ def extract_types(
                         row.col_end,
                         row.type_name,
                         row.owner_name,
+                        row.enclosing_function,
                         row.use_context,
                         row.by_pointer,
                         row.indirection_level,

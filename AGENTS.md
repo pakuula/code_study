@@ -283,12 +283,13 @@ ORDER BY file_path, line_number;
 ```
 
 Контексты `use_context` в текущей версии:
-- `func_param` — параметр функции; `owner_name` = имя функции
-- `func_return` — возвращаемый тип функции; `owner_name` = имя функции
-- `global_var` — глобальная переменная; `owner_name` = имя переменной
-- `static_var` — статическая переменная; `owner_name` = имя переменной
-- `field` — поле struct/union; `owner_name` = **имя структуры/union**, имя поля см. в `raw_context`
-- `typedef_target` — правая часть typedef; `owner_name` = имя alias-а
+- `func_param` — параметр функции; `owner_name` = имя функции; `enclosing_function` = имя функции
+- `func_return` — возвращаемый тип функции; `owner_name` = имя функции; `enclosing_function` = имя функции
+- `global_var` — глобальная переменная; `owner_name` = имя переменной; `enclosing_function` = NULL
+- `static_var` — статическая переменная; `owner_name` = имя переменной; `enclosing_function` = NULL
+- `field` — поле struct/union; `owner_name` = **имя структуры/union**, имя поля см. в `raw_context`; `enclosing_function` = NULL
+- `typedef_target` — правая часть typedef; `owner_name` = имя alias-а; `enclosing_function` = NULL
+- `local_var` — локальная переменная в теле функции; `owner_name` = имя переменной; `enclosing_function` = **имя функции**
 
 ### Как найти все struct/union, использующие тип как поле
 
@@ -317,8 +318,33 @@ ORDER BY struct_name, file_path, line_number;
 ```
 
 Ограничения текущей версии:
-- Локальные переменные не включаются в `v_type_uses` по дизайну стадии `extract_types`.
 - Для `use_context='field'` при объявлении нескольких полей одной строкой (`tcb_t *head, *end;`) создаётся одна запись (первый декларатор); детали — в `raw_context`.
+
+### Как найти функции, использующие тип как локальную переменную
+
+```sql
+-- В каких функциях тип :type_name объявляется как локальная переменная
+SELECT DISTINCT enclosing_function,
+       file_path
+FROM v_type_uses
+WHERE run_id = :run_id
+   AND type_name = :type_name
+   AND use_context = 'local_var'
+ORDER BY file_path, enclosing_function;
+```
+
+Для просмотра контекста объявления (имя переменной + фрагмент кода):
+
+```sql
+SELECT enclosing_function, file_path, line_number,
+       owner_name AS var_name,
+       by_pointer, raw_context
+FROM v_type_uses
+WHERE run_id = :run_id
+   AND type_name = :type_name
+   AND use_context = 'local_var'
+ORDER BY file_path, line_number;
+```
 
 Правило отчётности:
 - В финальном ответе всегда давать три секции: `typedef`, `resolution`, `uses`.
