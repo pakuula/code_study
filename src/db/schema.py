@@ -344,6 +344,98 @@ DDL: list[str] = [
         FOREIGN KEY (conditional_region_id) REFERENCES conditional_regions(region_id)
     )
     """,
+    # ------------------------------------------------------------------
+    # typedef alias graph: alias -> target type
+    # ------------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS type_aliases (
+        alias_id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id                 INTEGER NOT NULL,
+        file_id                INTEGER NOT NULL,
+        alias_entity_id        INTEGER,
+        alias_name             TEXT    NOT NULL,
+        target_spelling        TEXT,
+        target_base_name       TEXT,
+        target_kind            TEXT,    -- typedef / struct / union / enum / builtin / unknown
+        indirection_level      INTEGER DEFAULT 0,
+        detector               TEXT    NOT NULL,
+        confidence             TEXT    NOT NULL DEFAULT 'MEDIUM',
+        confidence_reason      TEXT,
+        raw_context            TEXT,
+        raw_context_line_start INTEGER,
+        raw_context_line_end   INTEGER,
+        raw_context_byte_start INTEGER,
+        raw_context_byte_end   INTEGER,
+        ambiguity_group_id     INTEGER,
+        FOREIGN KEY (run_id)             REFERENCES analysis_runs(run_id),
+        FOREIGN KEY (file_id)            REFERENCES files(file_id),
+        FOREIGN KEY (alias_entity_id)    REFERENCES entities(entity_id),
+        FOREIGN KEY (ambiguity_group_id) REFERENCES ambiguity_groups(group_id)
+    )
+    """,
+    # ------------------------------------------------------------------
+    # typedef chain resolution to non-typedef type
+    # ------------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS type_resolutions (
+        resolution_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id                 INTEGER NOT NULL,
+        alias_id               INTEGER NOT NULL,
+        alias_entity_id        INTEGER,
+        alias_name             TEXT    NOT NULL,
+        final_type_name        TEXT,
+        final_type_kind        TEXT,    -- struct / union / enum / builtin / unknown
+        total_indirection_level INTEGER DEFAULT 0,
+        is_composite           INTEGER, -- 1 for struct/union/enum, 0 otherwise, NULL unknown
+        resolution_path        TEXT,    -- JSON array of names
+        is_cycle               INTEGER DEFAULT 0,
+        is_ambiguous           INTEGER DEFAULT 0,
+        detector               TEXT    NOT NULL,
+        confidence             TEXT    NOT NULL DEFAULT 'MEDIUM',
+        confidence_reason      TEXT,
+        FOREIGN KEY (run_id)          REFERENCES analysis_runs(run_id),
+        FOREIGN KEY (alias_id)        REFERENCES type_aliases(alias_id),
+        FOREIGN KEY (alias_entity_id) REFERENCES entities(entity_id)
+    )
+    """,
+    # ------------------------------------------------------------------
+    # usage of types in signatures, global/static vars, fields, typedef targets
+    # ------------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS type_uses (
+        type_use_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id                 INTEGER NOT NULL,
+        file_id                INTEGER NOT NULL,
+        line_number            INTEGER NOT NULL,
+        col_start              INTEGER,
+        col_end                INTEGER,
+        type_name              TEXT    NOT NULL,
+        owner_name             TEXT,
+        use_context            TEXT    NOT NULL,
+            -- func_param / func_return / global_var / static_var / field / typedef_target
+        by_pointer             INTEGER DEFAULT 0,
+        indirection_level      INTEGER DEFAULT 0,
+        resolved_alias_id      INTEGER,
+        resolved_alias_entity_id INTEGER,
+        resolved_final_type_name TEXT,
+        resolved_final_type_kind TEXT,
+        resolved_is_composite  INTEGER,
+        detector               TEXT    NOT NULL,
+        confidence             TEXT    NOT NULL DEFAULT 'MEDIUM',
+        confidence_reason      TEXT,
+        raw_context            TEXT,
+        raw_context_line_start INTEGER,
+        raw_context_line_end   INTEGER,
+        raw_context_byte_start INTEGER,
+        raw_context_byte_end   INTEGER,
+        ambiguity_group_id     INTEGER,
+        FOREIGN KEY (run_id)                 REFERENCES analysis_runs(run_id),
+        FOREIGN KEY (file_id)                REFERENCES files(file_id),
+        FOREIGN KEY (resolved_alias_id)      REFERENCES type_aliases(alias_id),
+        FOREIGN KEY (resolved_alias_entity_id) REFERENCES entities(entity_id),
+        FOREIGN KEY (ambiguity_group_id)     REFERENCES ambiguity_groups(group_id)
+    )
+    """,
 ]
 
 INDEXES: list[str] = [
@@ -373,6 +465,14 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_pp_name           ON preprocessor_symbols(name)",
     "CREATE INDEX IF NOT EXISTS idx_pp_file           ON preprocessor_symbols(file_id)",
     "CREATE INDEX IF NOT EXISTS idx_epc_entity        ON entity_presence_conditions(entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_talias_run        ON type_aliases(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_talias_name       ON type_aliases(alias_name)",
+    "CREATE INDEX IF NOT EXISTS idx_talias_target     ON type_aliases(target_base_name)",
+    "CREATE INDEX IF NOT EXISTS idx_tres_run          ON type_resolutions(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tres_alias        ON type_resolutions(alias_name)",
+    "CREATE INDEX IF NOT EXISTS idx_tuses_run         ON type_uses(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tuses_name        ON type_uses(type_name)",
+    "CREATE INDEX IF NOT EXISTS idx_tuses_ctx         ON type_uses(use_context)",
     "CREATE INDEX IF NOT EXISTS idx_ambig_run         ON ambiguity_groups(run_id)",
 ]
 
@@ -537,6 +637,79 @@ VIEWS: list[str] = [
             AND ed.kind = 'variable'
             AND ed.line_start = rc.line_number
       )
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS v_type_aliases AS
+    SELECT
+        ta.alias_id,
+        ta.run_id,
+        ta.file_id,
+        f.path AS file_path,
+        ta.alias_entity_id,
+        ta.alias_name,
+        ta.target_spelling,
+        ta.target_base_name,
+        ta.target_kind,
+        ta.indirection_level,
+        ta.detector,
+        ta.confidence,
+        ta.confidence_reason,
+        ta.raw_context,
+        ta.ambiguity_group_id
+    FROM type_aliases ta
+    JOIN files f ON f.file_id = ta.file_id
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS v_type_resolutions AS
+    SELECT
+        tr.resolution_id,
+        tr.run_id,
+        tr.alias_id,
+        tr.alias_entity_id,
+        tr.alias_name,
+        tr.final_type_name,
+        tr.final_type_kind,
+        tr.total_indirection_level,
+        tr.is_composite,
+        tr.resolution_path,
+        tr.is_cycle,
+        tr.is_ambiguous,
+        tr.detector,
+        tr.confidence,
+        tr.confidence_reason,
+        ta.file_id,
+        f.path AS file_path
+    FROM type_resolutions tr
+    JOIN type_aliases ta ON ta.alias_id = tr.alias_id
+    JOIN files f ON f.file_id = ta.file_id
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS v_type_uses AS
+    SELECT
+        tu.type_use_id,
+        tu.run_id,
+        tu.file_id,
+        f.path AS file_path,
+        tu.line_number,
+        tu.col_start,
+        tu.col_end,
+        tu.type_name,
+        tu.owner_name,
+        tu.use_context,
+        tu.by_pointer,
+        tu.indirection_level,
+        tu.resolved_alias_id,
+        tu.resolved_alias_entity_id,
+        tu.resolved_final_type_name,
+        tu.resolved_final_type_kind,
+        tu.resolved_is_composite,
+        tu.detector,
+        tu.confidence,
+        tu.confidence_reason,
+        tu.raw_context,
+        tu.ambiguity_group_id
+    FROM type_uses tu
+    JOIN files f ON f.file_id = tu.file_id
     """,
 ]
 

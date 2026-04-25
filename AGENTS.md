@@ -220,6 +220,111 @@ ORDER BY f.path, rc.line_number;
 - Строки uses перечислять в формате `file_path:line_number -- enclosing_function`.
 - Если `v_variable_uses` и fallback расходятся, показывать обе выборки и явно помечать расхождение.
 
+### Как находить типы: typedef / chain resolution / use
+
+Основной источник typedef alias-ов: view `v_type_aliases`.
+
+```sql
+-- Где объявлен typedef :type_name в рамках :run_id
+SELECT file_path, alias_name,
+       target_base_name, target_kind,
+       indirection_level,
+       detector, confidence
+FROM v_type_aliases
+WHERE run_id = :run_id
+   AND alias_name = :type_name
+ORDER BY file_path, alias_name;
+```
+
+Основной источник chain resolution: view `v_type_resolutions`.
+
+```sql
+-- Во что разворачивается typedef :type_name
+SELECT file_path, alias_name,
+       final_type_name, final_type_kind,
+       total_indirection_level,
+       is_composite,
+       is_cycle, is_ambiguous,
+       detector, confidence
+FROM v_type_resolutions
+WHERE run_id = :run_id
+   AND alias_name = :type_name
+ORDER BY file_path, alias_name;
+```
+
+Основной источник uses: view `v_type_uses`.
+
+```sql
+-- Где используется тип :type_name (без локальных переменных)
+SELECT file_path, line_number,
+       use_context, owner_name,
+       by_pointer, indirection_level,
+       resolved_final_type_name,
+       resolved_final_type_kind,
+       resolved_is_composite,
+       detector, confidence
+FROM v_type_uses
+WHERE run_id = :run_id
+   AND type_name = :type_name
+ORDER BY file_path, line_number;
+```
+
+Для «чистого» отчёта uses (без слабых/неоднозначных):
+
+```sql
+SELECT file_path, line_number, use_context, owner_name,
+       resolved_final_type_name, resolved_final_type_kind
+FROM v_type_uses
+WHERE run_id = :run_id
+   AND type_name = :type_name
+   AND ambiguity_group_id IS NULL
+   AND confidence IN ('HIGH', 'MEDIUM')
+ORDER BY file_path, line_number;
+```
+
+Контексты `use_context` в текущей версии:
+- `func_param` — параметр функции; `owner_name` = имя функции
+- `func_return` — возвращаемый тип функции; `owner_name` = имя функции
+- `global_var` — глобальная переменная; `owner_name` = имя переменной
+- `static_var` — статическая переменная; `owner_name` = имя переменной
+- `field` — поле struct/union; `owner_name` = **имя структуры/union**, имя поля см. в `raw_context`
+- `typedef_target` — правая часть typedef; `owner_name` = имя alias-а
+
+### Как найти все struct/union, использующие тип как поле
+
+```sql
+-- В каких структурах/union тип :type_name используется как поле
+SELECT DISTINCT owner_name AS struct_name,
+       by_pointer, resolved_final_type_name
+FROM v_type_uses
+WHERE run_id = :run_id
+   AND type_name = :type_name
+   AND use_context = 'field'
+ORDER BY struct_name;
+```
+
+Для просмотра полного контекста каждого поля (имя поля в `raw_context`):
+
+```sql
+SELECT owner_name AS struct_name,
+       file_path, line_number,
+       by_pointer, raw_context
+FROM v_type_uses
+WHERE run_id = :run_id
+   AND type_name = :type_name
+   AND use_context = 'field'
+ORDER BY struct_name, file_path, line_number;
+```
+
+Ограничения текущей версии:
+- Локальные переменные не включаются в `v_type_uses` по дизайну стадии `extract_types`.
+- Для `use_context='field'` при объявлении нескольких полей одной строкой (`tcb_t *head, *end;`) создаётся одна запись (первый декларатор); детали — в `raw_context`.
+
+Правило отчётности:
+- В финальном ответе всегда давать три секции: `typedef`, `resolution`, `uses`.
+- Строки uses перечислять в формате `file_path:line_number -- use_context -- owner_name`.
+- Для `LOW` и `MEDIUM` обязательно указывать, что вывод индексный и требует верификации.
+
 ### Чеклист качества
 - [ ] Никогда не выполнять `DELETE`, `DROP`, `UPDATE` без явного задания.
 - [ ] При экспорте — включать `detector`, `confidence`, `raw_context`.

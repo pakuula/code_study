@@ -417,7 +417,7 @@ PK: `(entity_id, comment_id)`.
 | Значение      | Инструмент           | Надёжность | Стадия              |
 |---------------|----------------------|------------|---------------------|
 | `ctags`       | universal-ctags      | Высокая    | extract_entities    |
-| `tree_sitter` | tree-sitter-c        | Высокая    | (planned)           |
+| `tree_sitter` | tree-sitter-c        | Высокая    | extract_entities, extract_types |
 | `cscope`      | cscope               | Средняя    | extract_usages      |
 | `regex`       | Python `re`          | Низкая     | все стадии          |
 | `manual_rule` | ручное правило       | Переменная | reconcile           |
@@ -432,6 +432,9 @@ PK: `(entity_id, comment_id)`.
 - `v_call_out`
 - `v_variable_entities`
 - `v_variable_uses`
+- `v_type_aliases`
+- `v_type_resolutions`
+- `v_type_uses`
 
 Ниже приведено назначение каждого view и примеры запросов.
 
@@ -549,6 +552,118 @@ WHERE run_id = :run_id
 AND confidence = 'HIGH'
 AND ambiguity_group_id IS NULL
 ```
+
+### `v_type_aliases`
+
+View над `type_aliases` для typedef alias-записей (`alias -> target`).
+
+Содержит:
+- `alias_name`, `target_base_name`, `target_kind`
+- `indirection_level`
+- `file_path`
+- `detector`, `confidence`, `confidence_reason`
+- `raw_context`, `ambiguity_group_id`
+
+Пример:
+
+```sql
+SELECT file_path, alias_name,
+       target_base_name, target_kind,
+       indirection_level,
+       detector, confidence
+FROM v_type_aliases
+WHERE run_id = :run_id
+  AND alias_name = :type_name
+ORDER BY file_path, alias_name;
+```
+
+### `v_type_resolutions`
+
+View над `type_resolutions` для результатов разворачивания typedef-цепочек.
+
+Содержит:
+- `alias_name`
+- `final_type_name`, `final_type_kind`
+- `total_indirection_level`
+- `is_composite`, `is_cycle`, `is_ambiguous`
+- `resolution_path`
+- `detector`, `confidence`, `confidence_reason`
+- `file_path`
+
+Пример:
+
+```sql
+SELECT file_path, alias_name,
+       final_type_name, final_type_kind,
+       total_indirection_level,
+       is_composite,
+       is_cycle, is_ambiguous,
+       detector, confidence
+FROM v_type_resolutions
+WHERE run_id = :run_id
+  AND alias_name = :type_name
+ORDER BY file_path, alias_name;
+```
+
+### `v_type_uses`
+
+View над `type_uses` для использований типа в сигнатурах и non-local декларациях.
+
+Содержит:
+- `type_name`, `file_path`, `line_number`
+- `use_context` (`func_param`, `func_return`, `global_var`, `static_var`, `field`, `typedef_target`)
+- `owner_name` — семантика зависит от `use_context`:
+  - `func_param` / `func_return` → имя функции
+  - `global_var` / `static_var` → имя переменной
+  - `field` → **имя содержащей структуры/union** (тег); имя поля см. в `raw_context`
+  - `typedef_target` → имя alias-а
+- `by_pointer`, `indirection_level`
+- `resolved_final_type_name`, `resolved_final_type_kind`, `resolved_is_composite`
+- `detector`, `confidence`, `confidence_reason`, `ambiguity_group_id`
+
+Пример:
+
+```sql
+SELECT file_path, line_number,
+       use_context, owner_name,
+       by_pointer, indirection_level,
+       resolved_final_type_name,
+       resolved_final_type_kind,
+       resolved_is_composite,
+       detector, confidence
+FROM v_type_uses
+WHERE run_id = :run_id
+  AND type_name = :type_name
+ORDER BY file_path, line_number;
+```
+
+Для надёжной выборки без неоднозначностей:
+
+```sql
+SELECT file_path, line_number, use_context, owner_name,
+       resolved_final_type_name, resolved_final_type_kind
+FROM v_type_uses
+WHERE run_id = :run_id
+  AND type_name = :type_name
+  AND ambiguity_group_id IS NULL
+  AND confidence IN ('HIGH', 'MEDIUM')
+ORDER BY file_path, line_number;
+```
+
+Для поиска структур/union, в которых тип используется как поле:
+
+```sql
+SELECT DISTINCT owner_name AS struct_name, by_pointer, resolved_final_type_name
+FROM v_type_uses
+WHERE run_id = :run_id
+  AND type_name = :type_name
+  AND use_context = 'field'
+ORDER BY struct_name;
+```
+
+Примечания по охвату:
+- Текущая версия `extract_types` не включает локальные переменные в `v_type_uses`.
+- При нескольких декларациях одного поля в одной строке (`tcb_t *head, *end;`) создаётся одна запись (первый декларатор); детали — в `raw_context`.
 
 ---
 

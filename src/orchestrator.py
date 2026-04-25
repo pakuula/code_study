@@ -8,10 +8,11 @@
   2. discover_files — инвентаризировать файлы
   3. extract_includes      — include-граф
   4. extract_entities      — сущности (ctags)
-  5. extract_comments      — комментарии и привязка к сущностям
-  6. extract_preprocessor  — #define / #ifdef-регионы
-  7. extract_usages        — reference_candidates (cscope + regex)
-  8. reconcile             — сверка детекторов, confidence
+    5. extract_types         — typedef-цепочки и uses типов (без локалов)
+    6. extract_comments      — комментарии и привязка к сущностям
+    7. extract_preprocessor  — #define / #ifdef-регионы
+    8. extract_usages        — reference_candidates (cscope + regex)
+    9. reconcile             — сверка детекторов, confidence
 
 Каждая стадия логирует свой вывод. Оркестратор ведёт общий журнал с:
   - таймингом каждой стадии
@@ -48,6 +49,7 @@ from src.stages.extract_comments import extract_comments
 from src.stages.extract_entities import extract_entities
 from src.stages.extract_includes import extract_includes
 from src.stages.extract_preprocessor import extract_preprocessor
+from src.stages.extract_types import extract_types
 from src.stages.extract_usages import extract_usages
 from src.stages.reconcile import reconcile
 
@@ -60,6 +62,7 @@ _STAGE_ORDER = [
     "discover_files",
     "extract_includes",
     "extract_entities",
+    "extract_types",
     "extract_comments",
     "extract_preprocessor",
     "extract_usages",
@@ -117,7 +120,7 @@ def run_analysis(
         {
           run_id, db_path, source_root,
           pipeline_version, stages, all_errors,
-                    total: {files, entities, references, comments, includes, call_sites},
+                                        total: {files, entities, references, comments, includes, call_sites, type_aliases, type_resolutions, type_uses},
           elapsed_sec, status
         }
     """
@@ -217,6 +220,14 @@ def run_analysis(
         logger=_make_stage_logger("extract_entities"),
     )
     run_stage(
+        "extract_types",
+        extract_types,
+        source_root=source_root,
+        db_path=db_path,
+        run_id=run_id,
+        logger=_make_stage_logger("extract_types"),
+    )
+    run_stage(
         "extract_comments",
         extract_comments,
         source_root=source_root,
@@ -268,6 +279,9 @@ def run_analysis(
         "entities":   _count("entities"),
         "references": _count("reference_candidates"),
         "call_sites": _count("call_sites"),
+        "type_aliases": _count("type_aliases"),
+        "type_resolutions": _count("type_resolutions"),
+        "type_uses": _count("type_uses"),
         "comments":   _count("comments"),
         "includes":   _count("includes"),
         "regions":    _count("conditional_regions"),
