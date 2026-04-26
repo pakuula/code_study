@@ -8,11 +8,13 @@ This document explains which review prompt template to use and in what order.
 - `REVIEW_PROMPT_TEMPLATE.md` - generic template for custom review tasks.
 - `REVIEW_PROMPT_PREFLIGHT_EXPERT.md` - ready-to-use preflight review for Expert outputs.
 - `REVIEW_PROMPT_FULL_KE.md` - ready-to-use full review for Knowledge Extractor outputs.
+- `REVIEW_PROMPT_SYNTHESIS.md` - ready-to-use synthesis review for System Synthesizer outputs.
 
 ## When To Use Which Template
 1. Use `REVIEW_PROMPT_PREFLIGHT_EXPERT.md` before running Knowledge Extractor.
 2. Use `REVIEW_PROMPT_FULL_KE.md` after Knowledge Extractor produces final output.
-3. Use `REVIEW_PROMPT_TEMPLATE.md` for new domains, custom pipelines, or non-standard artifacts.
+3. Use `REVIEW_PROMPT_SYNTHESIS.md` after System Synthesizer produces subsystem-level conclusions.
+4. Use `REVIEW_PROMPT_TEMPLATE.md` for new domains, custom pipelines, or non-standard artifacts.
 
 ## Recommended Sequence
 1. Preflight gate:
@@ -25,6 +27,11 @@ This document explains which review prompt template to use and in what order.
    - Run reviewer with `REVIEW_PROMPT_FULL_KE.md`.
    - Expected result: `PASS` or `PASS_WITH_WARNINGS`.
    - If `FAIL`, fix and re-run full review.
+4. Synthesis gate (optional but recommended):
+   - Run System Synthesizer on KE output.
+   - Run reviewer with `REVIEW_PROMPT_SYNTHESIS.md`.
+   - Expected result: `PASS` or `PASS_WITH_WARNINGS`.
+   - If `FAIL`, fix synthesis and re-run synthesis review.
 
 ## Status And Verdict Meanings
 - `READY`: handoff artifacts are valid for downstream execution.

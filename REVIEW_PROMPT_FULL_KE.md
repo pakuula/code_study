@@ -35,6 +35,12 @@ Full Review
 5. Scope drift:
    - report stays within requested feature scope
    - no unsupported semantic extrapolation
+6. Use-case validation:
+   - use cases are present when required by instruction contract
+   - each use case is grounded in call/type/workflow evidence
+   - observed vs inferred status is explicit per use case
+   - MEDIUM/LOW use-case conclusions are marked verification-required
+   - no use-case narrative contradicts core entity/API evidence
 
 ## Output Format
 - Mode: Full Review

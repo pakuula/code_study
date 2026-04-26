@@ -1,10 +1,10 @@
 # Expert Reviewer Workflow
 
-Purpose: provide a repeatable validation process for artifacts produced by Expert and Knowledge Extractor.
+Purpose: provide a repeatable validation process for artifacts produced by Expert, Knowledge Extractor, and System Synthesizer (or equivalent synthesis role).
 
 ## Inputs
 - Review target artifacts.
-- Producer type: Expert or Knowledge Extractor.
+- Producer type: Expert, Knowledge Extractor, or System Synthesizer (or equivalent).
 - Applicable contracts and guides.
 - DB path and run_id when evidence validation is required.
 
@@ -12,6 +12,7 @@ Purpose: provide a repeatable validation process for artifacts produced by Exper
 - Identify review mode:
   - Preflight Review-Lite (for Expert output)
   - Full Review (for Knowledge Extractor output)
+  - Synthesis Review (for System Synthesizer output)
 - List expected artifacts and acceptance criteria.
 - List prohibited outputs or assumptions.
 
@@ -40,6 +41,17 @@ Purpose: provide a repeatable validation process for artifacts produced by Exper
 - Ensure alternatives are explicitly listed.
 - Ensure no single-candidate collapse without justification.
 
+## Step 6.5: Use-Case and Synthesis Audit
+For Full Review (KE producer):
+- validate use-case sections are grounded in call/type evidence
+- ensure scenario intent is labeled observed vs inferred
+- ensure MEDIUM/LOW scenario claims are verification-required
+
+For Synthesis Review (System Synthesizer producer):
+- validate each major conclusion maps back to KE evidence and/or run_id-scoped query clarification
+- ensure consolidated use-case families do not contradict KE report
+- ensure high-level architecture interpretation does not overstate confidence
+
 ## Step 7: Scope Drift Audit
 - Check for out-of-scope content.
 - Check for domain-specific hardcoding in generic files.
@@ -54,13 +66,17 @@ If mode is Full Review:
 - emit verdict PASS, PASS_WITH_WARNINGS, or FAIL
 - list findings by severity and required corrections
 
+If mode is Synthesis Review:
+- emit verdict PASS, PASS_WITH_WARNINGS, or FAIL
+- include synthesis-traceability findings and confidence-preservation findings
+
 ## Step 9: Re-Review Gate
 - Define exact acceptance criteria for next iteration.
 - Include minimal fix list to reach READY or PASS.
 - Keep residual risk list explicit.
 
 ## Output Template
-- Mode: Preflight Review-Lite | Full Review
+- Mode: Preflight Review-Lite | Full Review | Synthesis Review
 - Status/Verdict: READY | NEEDS_FIX | PASS | PASS_WITH_WARNINGS | FAIL
 - Findings:
   - Critical
