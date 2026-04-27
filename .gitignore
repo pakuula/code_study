@@ -5,7 +5,7 @@ __pycache__/
 *.log
 
 # Experimental artifacts and fixtures
-out/
+# out/
 sample/
 
 # Local query scratch outputs
